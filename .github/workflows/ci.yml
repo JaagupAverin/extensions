@@ -2,6 +2,7 @@ name: CI
 
 on:
   pull_request:
+  merge_group:
   push:
     branches:
       - "main"
@@ -11,31 +12,39 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
-  ZED_EXTENSION_CLI_SHA: acf9b22466fc0f1aa26c4a403278bef6a1560aaa
+  ZED_EXTENSION_CLI_SHA: 9ee3c503a4bbbc6b4a0f8a789acca4871d773223
 
 jobs:
   package:
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ (github.ref == 'refs/heads/main'
+      || github.event_name == 'merge_group'
+      || contains(github.event.pull_request.labels.*.name, 'large-runner'))
+      && 'namespace-profile-8x32-ubuntu-2404'
+      || 'namespace-profile-4x8-ubuntu-2404' }}
     if: github.repository_owner == 'zed-industries'
+    timeout-minutes: 10
     steps:
       - name: Checkout repo
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           clean: false
           fetch-depth: 0
 
-      - uses: pnpm/action-setup@v3
+      - uses: pnpm/setup@5d160c5bc68a09337ad0d5654e237e03253b5879 # v1
         with:
-          version: 9
+          version: 11
+          runtime: node@24.22.2
+          cache: true
 
-      - uses: actions/setup-node@cdca7365b2dadb8aad0a33bc7601856ffabcc48e # v4
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
-          node-version: "20"
-          cache: "pnpm"
+          toolchain: "1.90"
+          target: "wasm32-wasip2"
 
       - name: Cache zed-extension CLI
         id: cache-zed-extension
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             zed-extension
@@ -47,9 +56,6 @@ jobs:
           wget --quiet "https://zed-extension-cli.nyc3.digitaloceanspaces.com/$ZED_EXTENSION_CLI_SHA/x86_64-unknown-linux-gnu/zed-extension"
           chmod +x zed-extension
 
-      - name: Install dependencies
-        run: pnpm install
-
       - name: Build
         run: pnpm build
 
@@ -57,7 +63,7 @@ jobs:
         run: pnpm test
 
       - name: Cache extension build dependencies
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           key: cache-build-dependencies
           path: |
@@ -66,6 +72,8 @@ jobs:
       - name: Package extensions
         run: pnpm package-extensions
         env:
+          REF_NAME: ${{ github.ref_name }}
+          RUSTUP_TOOLCHAIN: "1.90"
           SHOULD_PUBLISH: ${{ github.ref_name == 'main' }}
           S3_BUCKET: ${{ secrets.S3_BUCKET }}
           S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY }}
@@ -78,3 +86,11 @@ jobs:
             echo -e "Fix by running:\n  pnpm sort-extensions\n"
             exit 1
           fi
+
+      - name: Enforce no Git LFS
+        run: |
+          # shellcheck disable=SC2016
+          git submodule foreach --quiet \
+            '[ ! -f .gitattributes ] || ! grep -q "filter=lfs" .gitattributes && [ ! -d .git/lfs ] || {
+              echo "LFS detected in $path" >&2 && exit 1
+            }'
